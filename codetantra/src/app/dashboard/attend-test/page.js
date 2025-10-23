@@ -15,6 +15,9 @@ export default function AttendTestPage() {
   const [showTestModal, setShowTestModal] = useState(false);
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [testStarted, setTestStarted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [testStatuses, setTestStatuses] = useState({});
+  const [codingLanguages, setCodingLanguages] = useState({}); // Track selected language per question
   const router = useRouter();
 
   useEffect(() => {
@@ -94,6 +97,25 @@ export default function AttendTestPage() {
         .order('scheduled_at', { ascending: true });
 
       if (testsError) throw testsError;
+
+      // Check submission status for each test
+      const statuses = {};
+      for (const test of tests || []) {
+        const { data: submissions, error: subError } = await supabase
+          .from('submissions')
+          .select('id, status')
+          .eq('test_id', test.id)
+          .eq('student_id', userData.id)
+          .limit(1);
+
+        if (!subError && submissions && submissions.length > 0) {
+          statuses[test.id] = 'completed';
+        } else {
+          statuses[test.id] = 'available';
+        }
+      }
+
+      setTestStatuses(statuses);
       setAvailableTests(tests || []);
     } catch (err) {
       console.error('Failed to load available tests:', err);
@@ -127,12 +149,33 @@ export default function AttendTestPage() {
   };
 
   const handleStartTest = async (test) => {
+    // Check if already completed or has malpractice
+    if (testStatuses[test.id] === 'completed') {
+      alert('You have already completed this test!');
+      return;
+    }
+
+    // Confirm start
+    if (!confirm('Once you start the test, you cannot close the window until submission. Any attempt to close will be marked as malpractice. Do you want to proceed?')) {
+      return;
+    }
+
     setSelectedTest(test);
     await loadTestQuestions(test.id);
     setAnswers({});
-    setTimeRemaining(test.duration * 60); // Convert minutes to seconds
+    setTimeRemaining(test.duration * 60);
     setTestStarted(true);
     setShowTestModal(true);
+
+    // Enter fullscreen
+    if (document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen();
+    }
+
+    // Prevent closing/navigation
+    window.onbeforeunload = () => {
+      return 'Test is in progress. Closing will mark as malpractice!';
+    };
   };
 
   const handleAnswerChange = (questionId, answer) => {
@@ -142,26 +185,90 @@ export default function AttendTestPage() {
     });
   };
 
+  const handleLanguageChange = (questionId, language) => {
+    setCodingLanguages({
+      ...codingLanguages,
+      [questionId]: language
+    });
+  };
+
+  const getLanguageTemplate = (language) => {
+    const templates = {
+      c: `#include <stdio.h>\n\nint main() {\n    // Write your code here\n    \n    return 0;\n}`,
+      cpp: `#include <iostream>\nusing namespace std;\n\nint main() {\n    // Write your code here\n    \n    return 0;\n}`,
+      java: `public class Solution {\n    public static void main(String[] args) {\n        // Write your code here\n        \n    }\n}`,
+      python: `# Write your code here\n\ndef main():\n    pass\n\nif __name__ == "__main__":\n    main()`
+    };
+    return templates[language] || '';
+  };
+
   const handleSubmitTest = async () => {
     if (!confirm('Are you sure you want to submit the test? You cannot change your answers after submission.')) {
       return;
     }
 
+    setSubmitting(true);
+
     try {
-      // Here you would save the answers to a submissions table
-      // For now, we'll just show an alert
-      const answeredCount = Object.keys(answers).length;
-      const totalQuestions = testQuestions.length;
-      
-      alert(`Test submitted successfully!\nAnswered: ${answeredCount}/${totalQuestions} questions`);
+      // Prepare submissions for all questions
+      const submissions = testQuestions.map((tq) => {
+        const question = tq.questions;
+        const studentAnswer = answers[question.id] || '';
+
+        let status = 'pending';
+        let score = 0;
+
+        // Auto-grade MCQ
+        if (question.question_type === 'mcq' && question.correct_answer) {
+          if (studentAnswer.trim().toUpperCase() === question.correct_answer.trim().toUpperCase()) {
+            status = 'correct';
+            score = question.marks;
+          } else {
+            status = 'incorrect';
+            score = 0;
+          }
+        }
+
+        return {
+          test_id: selectedTest.id,
+          question_id: question.id,
+          student_id: user.id,
+          answer: studentAnswer,
+          status: status,
+          score: score,
+          submitted_at: new Date().toISOString()
+        };
+      });
+
+      // Insert all submissions
+      const { error } = await supabase
+        .from('submissions')
+        .insert(submissions);
+
+      if (error) throw error;
+
+      // Remove beforeunload warning
+      window.onbeforeunload = null;
+
+      // Exit fullscreen
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+
+      alert('Test submitted successfully! Your answers have been recorded.');
       
       setShowTestModal(false);
       setTestStarted(false);
       setSelectedTest(null);
       setTestQuestions([]);
       setAnswers({});
+      
+      // Reload tests to update status
+      loadAvailableTests(user);
     } catch (err) {
       alert('Error submitting test: ' + err.message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -177,7 +284,12 @@ export default function AttendTestPage() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const getTestStatus = (scheduledAt) => {
+  const getTestStatus = (scheduledAt, testId) => {
+    // Check if completed
+    if (testStatuses[testId] === 'completed') {
+      return { label: 'Completed', color: 'bg-gray-500', canStart: false };
+    }
+
     if (!scheduledAt) return { label: 'Available', color: 'bg-green-500', canStart: true };
     const now = new Date();
     const scheduled = new Date(scheduledAt);
@@ -208,7 +320,7 @@ export default function AttendTestPage() {
         {/* Tests Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {availableTests.map((test) => {
-            const status = getTestStatus(test.scheduled_at);
+            const status = getTestStatus(test.scheduled_at, test.id);
             return (
               <div key={test.id} className="bg-white rounded-lg shadow-md hover:shadow-lg transition-shadow">
                 <div className="p-6">
@@ -271,7 +383,7 @@ export default function AttendTestPage() {
                         : 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     }`}
                   >
-                    {status.canStart ? 'Start Test' : 'Not Available Yet'}
+                    {status.label === 'Completed' ? 'Already Completed' : status.canStart ? 'Start Test' : 'Not Available Yet'}
                   </button>
                 </div>
               </div>
@@ -287,51 +399,81 @@ export default function AttendTestPage() {
         </div>
       </div>
 
-      {/* Test Taking Modal */}
+      {/* Test Taking Modal - Fullscreen */}
       {showTestModal && selectedTest && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto p-4">
-          <div className="bg-white rounded-lg max-w-4xl w-full my-8">
-            {/* Header with Timer */}
-            <div className="p-6 border-b bg-blue-600 text-white rounded-t-lg">
-              <div className="flex justify-between items-center">
-                <div>
-                  <h2 className="text-2xl font-bold mb-1">{selectedTest.title}</h2>
-                  <p className="text-blue-100">Answer all questions carefully</p>
+        <div className="fixed inset-0 bg-gradient-to-br from-gray-900 to-gray-800 z-[9999] overflow-hidden">
+          <div className="h-screen flex flex-col">
+            {/* Fixed Header with Timer */}
+            <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg">
+              <div className="max-w-7xl mx-auto px-6 py-4">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h2 className="text-2xl font-bold mb-1">{selectedTest.title}</h2>
+                    <p className="text-blue-100 text-sm">
+                      <span className="inline-block mr-4">📝 {testQuestions.length} Questions</span>
+                      <span className="inline-block">✅ Answered: {Object.keys(answers).length}</span>
+                    </p>
+                  </div>
+                  <div className="text-center bg-white bg-opacity-20 rounded-lg px-6 py-3">
+                    <p className="text-xs text-blue-100 mb-1">Time Remaining</p>
+                    <p className={`text-4xl font-bold tabular-nums ${timeRemaining < 60 ? 'text-red-300 animate-pulse' : ''}`}>
+                      {formatTime(timeRemaining)}
+                    </p>
+                  </div>
                 </div>
-                <div className="text-center">
-                  <p className="text-sm text-blue-100">Time Remaining</p>
-                  <p className={`text-3xl font-bold ${timeRemaining < 60 ? 'text-red-300' : ''}`}>
-                    {formatTime(timeRemaining)}
-                  </p>
-                </div>
+              </div>
+              
+              {/* Warning Banner */}
+              <div className="bg-red-600 text-white py-2 px-6">
+                <p className="text-center text-sm font-semibold">
+                  ⚠️ Do not close this window or navigate away. Doing so will mark this test as malpractice!
+                </p>
               </div>
             </div>
 
-            {/* Questions */}
-            <div className="p-6 max-h-[60vh] overflow-y-auto">
-              <div className="space-y-6">
-                {testQuestions.map((tq, index) => (
-                  <div key={tq.questions.id} className="bg-gray-50 p-6 rounded-lg">
-                    <div className="flex items-start gap-3 mb-4">
-                      <span className="bg-blue-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-bold flex-shrink-0">
-                        {index + 1}
-                      </span>
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-sm text-gray-600">
-                            {tq.questions.marks} {tq.questions.marks === 1 ? 'Mark' : 'Marks'}
+            {/* Scrollable Questions Area */}
+            <div className="flex-1 overflow-y-auto bg-gray-100">
+              <div className="max-w-5xl mx-auto px-6 py-8">
+                <div className="space-y-6">
+                  {testQuestions.map((tq, index) => (
+                    <div key={tq.questions.id} className="bg-white rounded-xl shadow-lg overflow-hidden">
+                      <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-6 py-4">
+                        <div className="flex items-center gap-3">
+                          <span className="bg-white text-blue-600 w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg">
+                            {index + 1}
                           </span>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-3">
+                              <span className="bg-yellow-400 text-gray-900 px-3 py-1 rounded-full text-xs font-bold">
+                                {tq.questions.marks} {tq.questions.marks === 1 ? 'Mark' : 'Marks'}
+                              </span>
+                              <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase ${
+                                tq.questions.question_type === 'mcq' ? 'bg-green-400 text-green-900' :
+                                tq.questions.question_type === 'short_answer' ? 'bg-purple-400 text-purple-900' :
+                                'bg-orange-400 text-orange-900'
+                              }`}>
+                                {tq.questions.question_type.replace('_', ' ')}
+                              </span>
+                            </div>
+                          </div>
                         </div>
-                        <h4 className="font-bold text-gray-900 mb-2 text-lg">{tq.questions.title}</h4>
-                        <p className="text-gray-700 mb-4">{tq.questions.description}</p>
+                      </div>
+
+                      <div className="p-6">
+                        <h4 className="font-bold text-gray-900 mb-3 text-xl">{tq.questions.title}</h4>
+                        <p className="text-gray-700 mb-6 text-lg leading-relaxed">{tq.questions.description}</p>
 
                         {/* MCQ Options */}
                         {tq.questions.question_type === 'mcq' && tq.questions.options && (
-                          <div className="space-y-2">
+                          <div className="space-y-3">
                             {JSON.parse(tq.questions.options).map((opt, idx) => (
                               <label
                                 key={idx}
-                                className="flex items-center gap-3 p-3 bg-white rounded-lg border-2 border-gray-200 hover:border-blue-400 cursor-pointer transition-colors"
+                                className={`flex items-start gap-4 p-4 rounded-lg border-2 cursor-pointer transition-all ${
+                                  answers[tq.questions.id] === String.fromCharCode(65 + idx)
+                                    ? 'border-blue-500 bg-blue-50 shadow-md'
+                                    : 'border-gray-300 bg-white hover:border-blue-300 hover:bg-blue-50'
+                                }`}
                               >
                                 <input
                                   type="radio"
@@ -339,10 +481,10 @@ export default function AttendTestPage() {
                                   value={String.fromCharCode(65 + idx)}
                                   checked={answers[tq.questions.id] === String.fromCharCode(65 + idx)}
                                   onChange={(e) => handleAnswerChange(tq.questions.id, e.target.value)}
-                                  className="w-5 h-5 text-blue-600"
+                                  className="w-5 h-5 text-blue-600 mt-1"
                                 />
-                                <span className="text-gray-900">
-                                  <strong>{String.fromCharCode(65 + idx)}.</strong> {opt}
+                                <span className="text-gray-900 flex-1 text-lg">
+                                  <strong className="text-blue-600">{String.fromCharCode(65 + idx)}.</strong> {opt}
                                 </span>
                               </label>
                             ))}
@@ -352,47 +494,125 @@ export default function AttendTestPage() {
                         {/* Short Answer */}
                         {tq.questions.question_type === 'short_answer' && (
                           <textarea
-                            rows="4"
+                            rows="5"
                             value={answers[tq.questions.id] || ''}
                             onChange={(e) => handleAnswerChange(tq.questions.id, e.target.value)}
-                            className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black"
+                            className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-black text-lg"
                             placeholder="Type your answer here..."
                           />
                         )}
 
                         {/* Coding */}
                         {tq.questions.question_type === 'coding' && (
-                          <div>
-                            <p className="text-sm text-gray-600 mb-2">Write your code solution:</p>
-                            <textarea
-                              rows="10"
-                              value={answers[tq.questions.id] || ''}
-                              onChange={(e) => handleAnswerChange(tq.questions.id, e.target.value)}
-                              className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black font-mono text-sm"
-                              placeholder="// Write your code here..."
-                            />
+                          <div className="bg-gray-900 rounded-lg overflow-hidden border-2 border-gray-700">
+                            {/* Code Editor Header */}
+                            <div className="bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-700">
+                              <div className="flex items-center gap-2">
+                                <div className="flex gap-1.5">
+                                  <div className="w-3 h-3 rounded-full bg-red-500"></div>
+                                  <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+                                  <div className="w-3 h-3 rounded-full bg-green-500"></div>
+                                </div>
+                                <span className="text-gray-400 text-sm ml-3 font-mono">Solution.{codingLanguages[tq.questions.id] || 'cpp'}</span>
+                              </div>
+                              
+                              {/* Language Selector */}
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-400 text-xs">Language:</span>
+                                <select
+                                  value={codingLanguages[tq.questions.id] || 'cpp'}
+                                  onChange={(e) => {
+                                    handleLanguageChange(tq.questions.id, e.target.value);
+                                    if (!answers[tq.questions.id]) {
+                                      handleAnswerChange(tq.questions.id, getLanguageTemplate(e.target.value));
+                                    }
+                                  }}
+                                  className="bg-gray-700 text-white px-3 py-1 rounded text-sm border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                  <option value="c">C</option>
+                                  <option value="cpp">C++</option>
+                                  <option value="java">Java</option>
+                                  <option value="python">Python</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* Code Editor Body */}
+                            <div className="relative">
+                              {/* Line Numbers */}
+                              <div className="absolute left-0 top-0 bottom-0 w-12 bg-gray-800 text-gray-500 text-right pr-3 py-4 font-mono text-sm select-none border-r border-gray-700">
+                                {(answers[tq.questions.id] || getLanguageTemplate(codingLanguages[tq.questions.id] || 'cpp')).split('\n').map((_, i) => (
+                                  <div key={i} className="leading-6">{i + 1}</div>
+                                ))}
+                              </div>
+
+                              {/* Code Textarea */}
+                              <textarea
+                                value={answers[tq.questions.id] || getLanguageTemplate(codingLanguages[tq.questions.id] || 'cpp')}
+                                onChange={(e) => handleAnswerChange(tq.questions.id, e.target.value)}
+                                className="w-full pl-16 pr-4 py-4 bg-gray-900 text-gray-100 font-mono text-sm leading-6 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                                rows="18"
+                                spellCheck="false"
+                                style={{
+                                  tabSize: 4,
+                                  caretColor: '#60A5FA'
+                                }}
+                              />
+                            </div>
+
+                            {/* Code Editor Footer */}
+                            <div className="bg-gray-800 px-4 py-2 flex items-center justify-between text-xs text-gray-400 border-t border-gray-700">
+                              <div className="flex items-center gap-4">
+                                <span>Lines: {(answers[tq.questions.id] || '').split('\n').length}</span>
+                                <span>Characters: {(answers[tq.questions.id] || '').length}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fillRule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clipRule="evenodd" />
+                                </svg>
+                                <span className="uppercase">{codingLanguages[tq.questions.id] || 'cpp'}</span>
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
 
-            {/* Footer */}
-            <div className="p-6 border-t bg-gray-50 rounded-b-lg">
-              <div className="flex justify-between items-center mb-4">
-                <p className="text-gray-600">
-                  Answered: <strong>{Object.keys(answers).length}</strong> / {testQuestions.length}
-                </p>
+            {/* Fixed Footer */}
+            <div className="bg-white border-t-4 border-blue-500 shadow-2xl">
+              <div className="max-w-7xl mx-auto px-6 py-4">
+                <div className="flex justify-between items-center">
+                  <div className="text-gray-700">
+                    <p className="text-sm mb-1">Progress</p>
+                    <div className="flex items-center gap-3">
+                      <div className="w-64 bg-gray-200 rounded-full h-3">
+                        <div
+                          className="bg-green-500 h-3 rounded-full transition-all"
+                          style={{ width: `${(Object.keys(answers).length / testQuestions.length) * 100}%` }}
+                        ></div>
+                      </div>
+                      <span className="font-bold text-lg">
+                        {Object.keys(answers).length} / {testQuestions.length}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleSubmitTest}
+                    disabled={submitting}
+                    className={`px-8 py-4 rounded-lg font-bold text-lg transition-all ${
+                      submitting
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-green-600 hover:bg-green-700 text-white shadow-lg hover:shadow-xl'
+                    }`}
+                  >
+                    {submitting ? 'Submitting...' : '✓ Submit Test'}
+                  </button>
+                </div>
               </div>
-              <button
-                onClick={handleSubmitTest}
-                className="w-full bg-green-600 text-white py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors"
-              >
-                Submit Test
-              </button>
             </div>
           </div>
         </div>

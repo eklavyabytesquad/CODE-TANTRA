@@ -12,6 +12,16 @@ export default function ManageTestsPage() {
   const [selectedTest, setSelectedTest] = useState(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [testQuestions, setTestQuestions] = useState([]);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingTest, setEditingTest] = useState(null);
+  const [classes, setClasses] = useState([]);
+  const [formData, setFormData] = useState({
+    title: '',
+    test_type: 'mcq',
+    class_id: '',
+    scheduled_at: '',
+    duration: 30
+  });
   const router = useRouter();
 
   useEffect(() => {
@@ -32,6 +42,7 @@ export default function ManageTestsPage() {
       } else {
         setUser(userData);
         loadTests(userData);
+        loadClasses(userData);
       }
     } catch (err) {
       console.error('Failed to load user:', err);
@@ -69,6 +80,20 @@ export default function ManageTestsPage() {
     }
   };
 
+  const loadClasses = async (userData) => {
+    try {
+      let query = supabase.from('classes').select('id, name');
+      if (userData.role === 'teacher') {
+        query = query.eq('teacher_id', userData.id);
+      }
+      const { data, error } = await query;
+      if (error) throw error;
+      setClasses(data || []);
+    } catch (err) {
+      console.error('Failed to load classes:', err);
+    }
+  };
+
   const loadTestDetails = async (testId) => {
     try {
       const { data, error } = await supabase
@@ -100,6 +125,45 @@ export default function ManageTestsPage() {
     setSelectedTest(test);
     await loadTestDetails(test.id);
     setShowDetailsModal(true);
+  };
+
+  const handleEdit = (test) => {
+    setEditingTest(test);
+    setFormData({
+      title: test.title,
+      test_type: test.test_type,
+      class_id: test.class_id,
+      scheduled_at: test.scheduled_at ? new Date(test.scheduled_at).toISOString().slice(0, 16) : '',
+      duration: test.duration
+    });
+    setShowEditModal(true);
+  };
+
+  const handleUpdate = async () => {
+    if (!formData.title || !formData.class_id) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('tests')
+        .update({
+          title: formData.title,
+          test_type: formData.test_type,
+          class_id: formData.class_id,
+          scheduled_at: formData.scheduled_at || null,
+          duration: parseInt(formData.duration)
+        })
+        .eq('id', editingTest.id);
+
+      if (error) throw error;
+      alert('Test updated successfully!');
+      setShowEditModal(false);
+      loadTests(user);
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
   };
 
   const handleDelete = async (id) => {
@@ -230,13 +294,19 @@ export default function ManageTestsPage() {
                   <div className="flex gap-2">
                     <button
                       onClick={() => handleViewDetails(test)}
-                      className="flex-1 bg-blue-500 text-white px-4 py-2 rounded-md hover:bg-blue-600 transition-colors text-sm font-medium"
+                      className="flex-1 bg-blue-500 text-white px-3 py-2 rounded-md hover:bg-blue-600 transition-colors text-sm font-medium"
                     >
-                      View Details
+                      View
+                    </button>
+                    <button
+                      onClick={() => handleEdit(test)}
+                      className="flex-1 bg-green-500 text-white px-3 py-2 rounded-md hover:bg-green-600 transition-colors text-sm font-medium"
+                    >
+                      Edit
                     </button>
                     <button
                       onClick={() => handleDelete(test.id)}
-                      className="bg-red-500 text-white px-4 py-2 rounded-md hover:bg-red-600 transition-colors text-sm font-medium"
+                      className="bg-red-500 text-white px-3 py-2 rounded-md hover:bg-red-600 transition-colors text-sm font-medium"
                     >
                       Delete
                     </button>
@@ -358,6 +428,109 @@ export default function ManageTestsPage() {
                 className="w-full bg-gray-300 text-gray-700 py-3 rounded-lg font-semibold hover:bg-gray-400 transition-colors"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {showEditModal && editingTest && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-2xl w-full">
+            <div className="p-6 border-b">
+              <div className="flex justify-between items-start">
+                <h2 className="text-2xl font-bold text-gray-900">Edit Test</h2>
+                <button
+                  onClick={() => setShowEditModal(false)}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Test Title *</label>
+                  <input
+                    type="text"
+                    value={formData.title}
+                    onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                    className="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black"
+                    placeholder="Enter test title"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Test Type *</label>
+                  <select
+                    value={formData.test_type}
+                    onChange={(e) => setFormData({ ...formData, test_type: e.target.value })}
+                    className="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black"
+                  >
+                    <option value="mcq">MCQ</option>
+                    <option value="short_answer">Short Answer</option>
+                    <option value="coding">Coding</option>
+                    <option value="mixed">Mixed</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Class *</label>
+                  <select
+                    value={formData.class_id}
+                    onChange={(e) => setFormData({ ...formData, class_id: e.target.value })}
+                    className="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black"
+                  >
+                    <option value="">Select Class</option>
+                    {classes.map((cls) => (
+                      <option key={cls.id} value={cls.id}>
+                        {cls.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Scheduled Date & Time</label>
+                  <input
+                    type="datetime-local"
+                    value={formData.scheduled_at}
+                    onChange={(e) => setFormData({ ...formData, scheduled_at: e.target.value })}
+                    className="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Duration (minutes) *</label>
+                  <input
+                    type="number"
+                    value={formData.duration}
+                    onChange={(e) => setFormData({ ...formData, duration: e.target.value })}
+                    min="1"
+                    className="w-full px-4 py-2 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-black"
+                    placeholder="e.g., 30"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 border-t flex gap-3">
+              <button
+                onClick={handleUpdate}
+                className="flex-1 bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+              >
+                Update Test
+              </button>
+              <button
+                onClick={() => setShowEditModal(false)}
+                className="flex-1 bg-gray-300 text-gray-700 py-3 rounded-lg font-semibold hover:bg-gray-400 transition-colors"
+              >
+                Cancel
               </button>
             </div>
           </div>
